@@ -27,12 +27,18 @@ Your sales team can finally focus on what matters:
 Building relationships and closing deals.                       
          
 
-### Features
-- **Targeted Search**: Uses Firecrawl's search endpoint to find relevant Quora URLs based on your search criteria
-- **Intelligent Extraction**: Leverages Firecrawl's new Extract endpoint to pull user information from Quora profiles
-- **Automated Processing**: Formats extracted user information into a clean, structured format
-- **Google Sheets Integration**: Automatically creates and populates Google Sheets with lead information
-- **Customizable Criteria**: Allows you to define specific search parameters to find your ideal leads for your niche
+## Features🌟
+
+- **🎯 Targeted Search**: Uses Firecrawl's search endpoint to find relevant Quora URLs based on your search criteria
+  
+- **💡 Intelligent Extraction**: Leverages Firecrawl's new Extract endpoint to pull user information from Quora profiles
+  
+- **⚙️ Automated Processing**: Formats extracted user information into a clean, structured format
+  
+- **💻 Google Sheets Integration**: Automatically creates and populates Google Sheets with lead information
+  
+- **✍️ Customizable Criteria**: Allows you to define specific search parameters to find your ideal leads for your niche
+  
 
 ![AI Lead Generation Agent](https://github.com/GURPREETKAURJETHRA/AI-Lead-Generation-Agent/blob/main/IMG_AILG/AIL3.jpg) 
 
@@ -42,7 +48,8 @@ The AI Lead Generation Agent automates the process of finding and qualifying pot
 
 ![AI Lead Generation Agent](https://github.com/GURPREETKAURJETHRA/AI-Lead-Generation-Agent/blob/main/IMG_AILG/AIL4.jpg) 
 
-### How to Get Started
+## ⚡How to Get Started
+
 1. **Clone the repository**:
    ```bash
    git clone https://github.com/GURPREETKAURJETHRA/AI-Lead-Generation-Agent.git
