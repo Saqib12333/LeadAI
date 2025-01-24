@@ -1,11 +1,15 @@
 # 🎯 AI Lead Generation Agent - Powered by Firecrawl's Extract Endpoint
 AI Lead Generation Agent that automatically discovers and qualifies potential leads from Quora. Using Firecrawl for intelligent web scraping, Phidata for agent orchestration, and Composio for Google Sheets integration, you'll create a system that can continuously generate and organize qualified leads with minimal human intervention!
 
-Here's what it does:
+![AI Lead Generation Agent](https://github.com/GURPREETKAURJETHRA/AI-Lead-Generation-Agent/blob/main/IMG_AILG/AIL1.jpg) 
+
+Here's what it does:                    
 ↳ Finds potential leads from online discussions                                      
 ↳ Extracts user profiles using intelligent web scraping                  
 ↳ Organizes qualified leads in Google Sheets                     
-↳ Runs on autopilot without human supervision                      
+↳ Runs on autopilot without human supervision        
+
+![AI Lead Generation Agent](https://github.com/GURPREETKAURJETHRA/AI-Lead-Generation-Agent/blob/main/IMG_AILG/AIL2.jpg) 
            
 The best part?                 
 It's built with tools anyone can use:                    
@@ -30,8 +34,13 @@ Building relationships and closing deals.
 - **Google Sheets Integration**: Automatically creates and populates Google Sheets with lead information
 - **Customizable Criteria**: Allows you to define specific search parameters to find your ideal leads for your niche
 
+![AI Lead Generation Agent](https://github.com/GURPREETKAURJETHRA/AI-Lead-Generation-Agent/blob/main/IMG_AILG/AIL3.jpg) 
+
+
 The AI Lead Generation Agent automates the process of finding and qualifying potential leads from Quora. It uses Firecrawl's search and the new Extract endpoint to identify relevant user profiles, extract valuable information, and organize it into a structured format in Google Sheets. This agent helps sales and marketing teams efficiently build targeted lead lists while saving hours of manual research!!!
-  
+
+
+![AI Lead Generation Agent](https://github.com/GURPREETKAURJETHRA/AI-Lead-Generation-Agent/blob/main/IMG_AILG/AIL4.jpg) 
 
 ### How to Get Started
 1. **Clone the repository**:
@@ -56,3 +65,17 @@ The AI Lead Generation Agent automates the process of finding and qualifying pot
    ```bash
    streamlit run ai_lead_generation_agent.py
    ```
+
+
+Happy coding! 🚀✨
+
+## ©️ License 🪪 
+
+Distributed under the MIT License. See `LICENSE` for more information.
+
+---
+
+#### **If you like this LLM Project do drop ⭐ to this repo**
+#### Follow me on [![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/gurpreetkaurjethra/) &nbsp; [![GitHub](https://img.shields.io/badge/github-%23121011.svg?style=for-the-badge&logo=github&logoColor=white)](https://github.com/GURPREETKAURJETHRA/)
+
+---
