@@ -175,3 +175,4 @@ cython_debug/
 
 # Streamlit local secrets (do not commit real keys)
 .streamlit/secrets.toml
+.composio.lock
