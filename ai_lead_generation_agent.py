@@ -6,6 +6,14 @@ from firecrawl import FirecrawlApp
 from pydantic import BaseModel, Field
 from typing import List, Optional
 import json
+import re
+import logging
+logger = logging.getLogger("leadai")
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(_h)
+logger.setLevel(logging.INFO)
 from composio_phidata import Action, ComposioToolSet
 
 class QuoraUserInteractionSchema(BaseModel):
@@ -88,51 +96,189 @@ def format_user_info_to_flattened_json(user_info_list: List[dict]) -> List[dict]
     
     return flattened_data
 
-def write_to_google_sheets_via_composio(flattened_data: List[dict], composio_api_key: str, title: Optional[str] = None) -> Optional[str]:
+def _to_jsonable(obj: object) -> object:
+    """Best-effort conversion of arbitrary objects to JSON-like structures for inspection."""
+    try:
+        # Pass through primitives, dicts and lists
+        if obj is None or isinstance(obj, (str, int, float, bool, dict, list)):
+            return obj
+        # pydantic/BaseModel style
+        if hasattr(obj, "model_dump") and callable(obj.model_dump):
+            return obj.model_dump()  # type: ignore
+        if hasattr(obj, "dict") and callable(obj.dict):
+            return obj.dict()  # type: ignore
+        # dataclass-like
+        try:
+            from dataclasses import asdict, is_dataclass
+            if is_dataclass(obj):
+                return asdict(obj)
+        except Exception:
+            pass
+        # generic object attributes
+        if hasattr(obj, "__dict__"):
+            return dict(obj.__dict__)
+    except Exception:
+        pass
+    return obj
+
+
+def _extract_google_sheet_url_from_any(obj: object) -> Optional[str]:
+    """Try multiple strategies to extract a Google Sheets URL from any object."""
+    # 1. If dict-like, look for common fields recursively
+    try:
+        obj = _to_jsonable(obj)
+        if isinstance(obj, dict):
+            # Construct from spreadsheetId if available
+            sid = obj.get("spreadsheetId") or obj.get("spreadsheet_id")
+            if isinstance(sid, str) and sid:
+                return f"https://docs.google.com/spreadsheets/d/{sid}"
+            # direct fields
+            for key in (
+                "spreadsheetUrl",
+                "spreadsheetURL",
+                "url",
+                "sheet_url",
+                "sheetUrl",
+                "document_url",
+                "link",
+                "webViewLink",
+            ):
+                val = obj.get(key)
+                if isinstance(val, str) and "docs.google.com/spreadsheets/d/" in val:
+                    return val
+            # nested search
+            for v in obj.values():
+                found = _extract_google_sheet_url_from_any(v)
+                if found:
+                    return found
+        elif isinstance(obj, list):
+            for it in obj:
+                found = _extract_google_sheet_url_from_any(it)
+                if found:
+                    return found
+    except Exception:
+        pass
+
+    # 2. Fallback: stringify and regex
+    try:
+        text = obj if isinstance(obj, str) else json.dumps(obj, default=str)
+    except Exception:
+        text = str(obj)
+    m = re.search(r"https://docs\.google\.com/spreadsheets/d/[\w-]+", text)
+    if m:
+        return m.group(0)
+    # 3. Fallback: find spreadsheetId in text and construct URL
+    m2 = re.search(r"spreadsheetId\"?\s*[:=]\s*\"([\w-]+)\"", text)
+    if m2:
+        return f"https://docs.google.com/spreadsheets/d/{m2.group(1)}"
+    return None
+
+
+def write_to_google_sheets_via_composio(flattened_data: List[dict], composio_api_key: str, title: Optional[str] = None, debug: bool = False) -> Optional[str]:
     """Create a Google Sheet from JSON via Composio directly (no LLM)."""
     try:
+        if not flattened_data:
+            if debug:
+                st.warning("No data to write to Google Sheets.")
+            return None
         toolset = ComposioToolSet(api_key=composio_api_key)
-        tool = toolset.get_tools(actions=[Action.GOOGLESHEETS_SHEET_FROM_JSON])[0]
+        toolkit = toolset.get_tools(actions=[Action.GOOGLESHEETS_SHEET_FROM_JSON])[0]
+        logger.info("Composio toolkit acquired: type=%s attrs=%s", type(toolkit).__name__, [a for a in dir(toolkit) if not a.startswith('_')][:30])
 
+        # Prefer an explicit title; Composio often accepts "title" + "data" as list[dict]
         payload_options = [
             {"title": title or "AI Leads", "data": flattened_data},
-            {"title": title or "AI Leads", "json": flattened_data},
             {"title": title or "AI Leads", "rows": flattened_data},
+            {"title": title or "AI Leads", "json": flattened_data},
             {"data": flattened_data},
         ]
 
         result = None
+        used_payload = None
         for payload in payload_options:
             try:
-                if hasattr(tool, "run"):
-                    result = tool.run(**payload)
-                elif callable(tool):
-                    result = tool(**payload)
-                else:
-                    result = tool.run(payload) if hasattr(tool, "run") else tool(payload)  # type: ignore
+                logger.info("Calling Composio GOOGLESHEETS_SHEET_FROM_JSON with keys=%s", list(payload.keys()))
+                # Preferred signature
+                if hasattr(toolkit, "run"):
+                    try:
+                        result = toolkit.run(action=Action.GOOGLESHEETS_SHEET_FROM_JSON, params=payload)
+                    except TypeError:
+                        # Some versions may take (action, params)
+                        result = toolkit.run(Action.GOOGLESHEETS_SHEET_FROM_JSON, payload)
+                # Fallbacks
+                if result is None and hasattr(toolkit, "run_action"):
+                    result = toolkit.run_action(Action.GOOGLESHEETS_SHEET_FROM_JSON, payload)
+                if result is None and hasattr(toolkit, "invoke"):
+                    try:
+                        result = toolkit.invoke(action=Action.GOOGLESHEETS_SHEET_FROM_JSON, params=payload)
+                    except Exception:
+                        pass
+                if result is None and hasattr(toolkit, "execute"):
+                    try:
+                        result = toolkit.execute(action=Action.GOOGLESHEETS_SHEET_FROM_JSON, params=payload)
+                    except Exception:
+                        pass
+                # Last resort: if toolkit exposes a 'tools' collection
+                if result is None and hasattr(toolkit, "tools"):
+                    try:
+                        for t in getattr(toolkit, "tools"):
+                            t_name = getattr(t, "name", "")
+                            if isinstance(t_name, str) and "GOOGLESHEETS" in t_name.upper():
+                                if hasattr(t, "run"):
+                                    result = t.run(**payload)
+                                    break
+                                if callable(t):
+                                    result = t(**payload)
+                                    break
+                    except Exception:
+                        pass
                 if result:
+                    used_payload = payload
                     break
-            except Exception:
+            except Exception as e:
+                logger.exception("Composio call failed for payload keys=%s", list(payload.keys()))
                 continue
 
         if not result:
             return None
 
-        text = None
-        if isinstance(result, str):
-            text = result
-        elif hasattr(result, "content"):
-            text = str(result.content)
-        elif isinstance(result, dict):
-            text = json.dumps(result)
-        else:
+        # Extract URL robustly
+        url = _extract_google_sheet_url_from_any(result)
+        if url:
+            logger.info("Parsed Google Sheets URL: %s", url)
+            return url
+        # As a last resort, stringify and search
+        try:
+            text = result if isinstance(result, str) else json.dumps(result, default=str)
+        except Exception:
             text = str(result)
-
-        if text and "https://docs.google.com/spreadsheets/d/" in text:
-            link_part = text.split("https://docs.google.com/spreadsheets/d/")[1].split()[0]
-            return f"https://docs.google.com/spreadsheets/d/{link_part}"
+        url = _extract_google_sheet_url_from_any(text)
+        if url:
+            logger.info("Parsed Google Sheets URL from text: %s", url)
+            return url
+        if debug:
+            st.warning("Could not parse a Google Sheets link from Composio response. See raw response below.")
+            with st.expander("Raw Composio response"):
+                st.write({
+                    "used_payload_keys": list(used_payload.keys()) if used_payload else None,
+                    "result_type": type(result).__name__,
+                    "result_preview": str(result)[:1000],
+                })
+                st.write(result)
+        # Extra terminal diagnostics
+        try:
+            attrs = [a for a in dir(result) if not a.startswith("_")]
+        except Exception:
+            attrs = []
+        logger.warning(
+            "Failed to parse Google Sheets link; result_type=%s attrs=%s preview=%s",
+            type(result).__name__, attrs[:50], str(result)[:500]
+        )
         return None
-    except Exception:
+    except Exception as e:
+        logger.exception("Error while writing to Google Sheets via Composio")
+        if debug:
+            st.exception(e)
         return None
 
 PROMPT_TRANSFORM_INSTRUCTIONS = (
@@ -150,19 +296,33 @@ PROMPT_TRANSFORM_INSTRUCTIONS = (
     "Always focus on the core product/service and keep it concise but clear."
 )
 
+def get_secret(name: str) -> str:
+    """Fetch a secret from Streamlit secrets (top-level or [default]) or env vars."""
+    try:
+        # Top-level
+        if name in st.secrets:
+            return str(st.secrets[name])
+        # [default] table support
+        if "default" in st.secrets and name in st.secrets["default"]:
+            return str(st.secrets["default"][name])
+    except Exception:
+        pass
+    return os.environ.get(name, "")
+
 def _parse_gemini_keys(raw: str) -> List[str]:
-    keys = []
+    keys: List[str] = []
+    # 1) UI-provided raw
     if raw:
         parts = [p.strip() for p in raw.split(",")]
-        keys = [p for p in parts if p]
-    # Fallback: separate indexed keys
+        keys.extend([p for p in parts if p])
+    # 2) Secrets-provided comma-separated
+    raw_from_secrets = get_secret("GEMINI_API_KEYS")
+    if raw_from_secrets:
+        parts2 = [p.strip() for p in raw_from_secrets.split(",")]
+        keys.extend([p for p in parts2 if p])
+    # 3) Separate indexed keys
     for i in range(1, 4):
-        v = os.environ.get(f"GEMINI_API_KEY_{i}", "")
-        if not v:
-            try:
-                v = str(st.secrets.get(f"GEMINI_API_KEY_{i}", ""))
-            except Exception:
-                v = ""
+        v = get_secret(f"GEMINI_API_KEY_{i}")
         if v:
             keys.append(v)
     # Deduplicate while preserving order
@@ -200,28 +360,25 @@ def main():
 
     with st.sidebar:
         st.header("API Keys")
-        # Prefer Streamlit secrets; fallback to environment variables; allow UI override
-        def _get_secret(name: str) -> str:
-            try:
-                if name in st.secrets:
-                    return str(st.secrets[name])
-            except Exception:
-                pass
-            return os.environ.get(name, "")
-
-        firecrawl_api_key_default = _get_secret("FIRECRAWL_API_KEY")
-    composio_api_key_default = _get_secret("COMPOSIO_API_KEY")
-        gemini_keys_raw_default = _get_secret("GEMINI_API_KEYS")
+        # Prefer Streamlit secrets (top-level or [default]); fallback to env; allow UI override
+        firecrawl_api_key_default = get_secret("FIRECRAWL_API_KEY")
+        composio_api_key_default = get_secret("COMPOSIO_API_KEY")
+        gemini_keys_raw_default = get_secret("GEMINI_API_KEYS")
 
         firecrawl_api_key = st.text_input("Firecrawl API Key", value=firecrawl_api_key_default, type="password")
-        st.caption(" Get your Firecrawl API key from [Firecrawl's website](https://www.firecrawl.dev/app/api-keys)")
-    gemini_keys_raw = st.text_input("Gemini API Keys (comma-separated)", value=gemini_keys_raw_default, type="password")
-    st.caption(" Provide 1–3 Gemini API keys; they will be rotated per request. Get keys from Google AI Studio.")
-    composio_api_key = st.text_input("Composio API Key", value=composio_api_key_default, type="password")
-    st.caption(" Provide your Composio API key with Google Sheets integration enabled.")
-        
-        num_links = st.number_input("Number of links to search", min_value=1, max_value=10, value=3)
-        
+        st.caption("Get your Firecrawl API key from [Firecrawl's website](https://www.firecrawl.dev/app/api-keys)")
+
+        gemini_keys_raw = st.text_input("Gemini API Keys (comma-separated)", value=gemini_keys_raw_default, type="password")
+        st.caption("Provide 1–3 Gemini API keys; they will be rotated per request. Get keys from Google AI Studio.")
+
+        composio_api_key = st.text_input("Composio API Key", value=composio_api_key_default, type="password")
+        st.caption("Provide your Composio API key with Google Sheets integration enabled.")
+
+        num_links = st.number_input("Number of links to search", min_value=1, max_value=25, value=10)
+
+        sheet_title = st.text_input("Google Sheet title (optional)", value="AI Leads")
+        show_debug = st.checkbox("Show Composio debug output", value=False)
+
         if st.button("Reset"):
             st.session_state.clear()
             st.experimental_rerun()
@@ -269,9 +426,18 @@ def main():
                 
                 with st.spinner("Formatting user info..."):
                     flattened_data = format_user_info_to_flattened_json(user_info_list)
-                
-                with st.spinner("Writing to Google Sheets via Composio..."):
-                    google_sheets_link = write_to_google_sheets_via_composio(flattened_data, composio_api_key)
+
+                google_sheets_link: Optional[str] = None
+                if not flattened_data:
+                    st.warning("No interactions found to write. Try increasing the number of links or refining the query.")
+                else:
+                    with st.spinner("Writing to Google Sheets via Composio..."):
+                        google_sheets_link = write_to_google_sheets_via_composio(
+                            flattened_data,
+                            composio_api_key,
+                            title=sheet_title.strip() or None,
+                            debug=show_debug,
+                        )
                 
                 if google_sheets_link:
                     st.success("Lead generation and data writing to Google Sheets completed successfully!")
@@ -279,6 +445,25 @@ def main():
                     st.markdown(f"[View Google Sheet]({google_sheets_link})")
                 else:
                     st.error("Failed to retrieve the Google Sheets link.")
+                    # Fallback: offer CSV download
+                    try:
+                        import io, csv
+                        csv_buf = io.StringIO()
+                        if flattened_data:
+                            fieldnames = list(flattened_data[0].keys())
+                            writer = csv.DictWriter(csv_buf, fieldnames=fieldnames)
+                            writer.writeheader()
+                            for row in flattened_data:
+                                writer.writerow(row)
+                            st.download_button(
+                                label="Download CSV",
+                                data=csv_buf.getvalue(),
+                                file_name=(sheet_title.strip() or "AI Leads").replace(" ", "_") + ".csv",
+                                mime="text/csv",
+                            )
+                            st.info("CSV provided as a fallback while we refine the Sheets link parsing.")
+                    except Exception:
+                        pass
             else:
                 st.warning("No relevant URLs found.")
 
