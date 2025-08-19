@@ -17,7 +17,7 @@ It's built with tools anyone can use:
 → **Firecrawl** for smart web scraping                     
 → **phidata** for agent orchestration                      
 → **Composio** for Google Sheets integration                       
-→ **OpenAI GPT-4o** for lead qualification                            
+→ **Gemini (gemini-2.5-pro)** for prompt transformation and lead targeting
        
 - No more manual searching.            
 - No more copy-pasting.                   
@@ -59,14 +59,14 @@ The AI Lead Generation Agent automates the process of finding and qualifying pot
    ```bash
    pip install -r requirements.txt
    ```
-4. **Important thing to do in composio**:
+4. **Important thing to do in Composio**:
     - in the terminal, run this command: `composio add googlesheets`
     - In your compposio dashboard, create a new google sheet intergation and make sure it is active in the active integrations/connections tab
 
 5. **Set up your API keys**:
    - Get your Firecrawl API key from [Firecrawl's website](https://www.firecrawl.dev/app/api-keys)
-   - Get your Composio API key from [Composio's website](https://composio.ai)
-   - Get your OpenAI API key from [OpenAI's website](https://platform.openai.com/api-keys)
+   - Provide Gemini API keys (you can use multiple; comma-separated) from Google AI Studio
+   - Provide your Composio API key with Google Sheets integration enabled
 
 6. **Run the application**:
    ```bash

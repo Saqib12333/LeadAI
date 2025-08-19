@@ -1,13 +1,12 @@
 import streamlit as st
+import os
+import google.generativeai as genai
 import requests
-from phi.agent import Agent
-from phi.tools.firecrawl import FirecrawlTools
-from phi.model.openai import OpenAIChat
 from firecrawl import FirecrawlApp
 from pydantic import BaseModel, Field
-from typing import List
-from composio_phidata import Action, ComposioToolSet
+from typing import List, Optional
 import json
+from composio_phidata import Action, ComposioToolSet
 
 class QuoraUserInteractionSchema(BaseModel):
     username: str = Field(description="The username of the user who posted the question or answer")
@@ -89,61 +88,111 @@ def format_user_info_to_flattened_json(user_info_list: List[dict]) -> List[dict]
     
     return flattened_data
 
-def create_google_sheets_agent(composio_api_key: str, openai_api_key: str) -> Agent:
-    composio_toolset = ComposioToolSet(api_key=composio_api_key)
-    google_sheets_tool = composio_toolset.get_tools(actions=[Action.GOOGLESHEETS_SHEET_FROM_JSON])[0]
-    
-    google_sheets_agent = Agent(
-        model=OpenAIChat(id="gpt-4o-mini", api_key=openai_api_key),
-        tools=[google_sheets_tool],
-        show_tool_calls=True,
-        system_prompt="You are an expert at creating and updating Google Sheets. You will be given user information in JSON format, and you need to write it into a new Google Sheet.",
-        markdown=True
-    )
-    return google_sheets_agent
-
-def write_to_google_sheets(flattened_data: List[dict], composio_api_key: str, openai_api_key: str) -> str:
-    google_sheets_agent = create_google_sheets_agent(composio_api_key, openai_api_key)
-    
+def write_to_google_sheets_via_composio(flattened_data: List[dict], composio_api_key: str, title: Optional[str] = None) -> Optional[str]:
+    """Create a Google Sheet from JSON via Composio directly (no LLM)."""
     try:
-        message = (
-            "Create a new Google Sheet with this data. "
-            "The sheet should have these columns: Website URL, Username, Bio, Post Type, Timestamp, Upvotes, and Links in the same order as mentioned. "
-            "Here's the data in JSON format:\n\n"
-            f"{json.dumps(flattened_data, indent=2)}"
-        )
-        
-        create_sheet_response = google_sheets_agent.run(message)
-        
-        if "https://docs.google.com/spreadsheets/d/" in create_sheet_response.content:
-            google_sheets_link = create_sheet_response.content.split("https://docs.google.com/spreadsheets/d/")[1].split(" ")[0]
-            return f"https://docs.google.com/spreadsheets/d/{google_sheets_link}"
+        toolset = ComposioToolSet(api_key=composio_api_key)
+        tool = toolset.get_tools(actions=[Action.GOOGLESHEETS_SHEET_FROM_JSON])[0]
+
+        payload_options = [
+            {"title": title or "AI Leads", "data": flattened_data},
+            {"title": title or "AI Leads", "json": flattened_data},
+            {"title": title or "AI Leads", "rows": flattened_data},
+            {"data": flattened_data},
+        ]
+
+        result = None
+        for payload in payload_options:
+            try:
+                if hasattr(tool, "run"):
+                    result = tool.run(**payload)
+                elif callable(tool):
+                    result = tool(**payload)
+                else:
+                    result = tool.run(payload) if hasattr(tool, "run") else tool(payload)  # type: ignore
+                if result:
+                    break
+            except Exception:
+                continue
+
+        if not result:
+            return None
+
+        text = None
+        if isinstance(result, str):
+            text = result
+        elif hasattr(result, "content"):
+            text = str(result.content)
+        elif isinstance(result, dict):
+            text = json.dumps(result)
+        else:
+            text = str(result)
+
+        if text and "https://docs.google.com/spreadsheets/d/" in text:
+            link_part = text.split("https://docs.google.com/spreadsheets/d/")[1].split()[0]
+            return f"https://docs.google.com/spreadsheets/d/{link_part}"
+        return None
     except Exception:
-        pass
-    return None
+        return None
 
-def create_prompt_transformation_agent(openai_api_key: str) -> Agent:
-    return Agent(
-        model=OpenAIChat(id="gpt-4o-mini", api_key=openai_api_key),
-        system_prompt="""You are an expert at transforming detailed user queries into concise company descriptions.
-Your task is to extract the core business/product focus in 3-4 words.
+PROMPT_TRANSFORM_INSTRUCTIONS = (
+    "You are an expert at transforming detailed user queries into concise company descriptions.\n"
+    "Your task is to extract the core business/product focus in 3-4 words.\n\n"
+    "Examples:\n"
+    "Input: \"Generate leads looking for AI-powered customer support chatbots for e-commerce stores.\"\n"
+    "Output: \"AI customer support chatbots for e commerce\"\n\n"
+    "Input: \"Find people interested in voice cloning technology for creating audiobooks and podcasts\"\n"
+    "Output: \"voice cloning technology\"\n\n"
+    "Input: \"Looking for users who need automated video editing software with AI capabilities\"\n"
+    "Output: \"AI video editing software\"\n\n"
+    "Input: \"Need to find businesses interested in implementing machine learning solutions for fraud detection\"\n"
+    "Output: \"ML fraud detection\"\n\n"
+    "Always focus on the core product/service and keep it concise but clear."
+)
 
-Examples:
-Input: "Generate leads looking for AI-powered customer support chatbots for e-commerce stores."
-Output: "AI customer support chatbots for e commerce"
+def _parse_gemini_keys(raw: str) -> List[str]:
+    keys = []
+    if raw:
+        parts = [p.strip() for p in raw.split(",")]
+        keys = [p for p in parts if p]
+    # Fallback: separate indexed keys
+    for i in range(1, 4):
+        v = os.environ.get(f"GEMINI_API_KEY_{i}", "")
+        if not v:
+            try:
+                v = str(st.secrets.get(f"GEMINI_API_KEY_{i}", ""))
+            except Exception:
+                v = ""
+        if v:
+            keys.append(v)
+    # Deduplicate while preserving order
+    seen = set()
+    uniq = []
+    for k in keys:
+        if k not in seen:
+            uniq.append(k)
+            seen.add(k)
+    return uniq
 
-Input: "Find people interested in voice cloning technology for creating audiobooks and podcasts"
-Output: "voice cloning technology"
+def transform_with_gemini(api_keys: List[str], user_query: str) -> str:
+    if not api_keys:
+        raise ValueError("No Gemini API keys provided")
+    # Round-robin rotation persisted in session
+    idx_key = "gemini_key_index"
+    if idx_key not in st.session_state:
+        st.session_state[idx_key] = 0
+    idx = st.session_state[idx_key] % len(api_keys)
+    st.session_state[idx_key] = (st.session_state[idx_key] + 1) % max(1, len(api_keys))
 
-Input: "Looking for users who need automated video editing software with AI capabilities"
-Output: "AI video editing software"
-
-Input: "Need to find businesses interested in implementing machine learning solutions for fraud detection"
-Output: "ML fraud detection"
-
-Always focus on the core product/service and keep it concise but clear.""",
-        markdown=True
-    )
+    genai.configure(api_key=api_keys[idx])
+    model = genai.GenerativeModel("gemini-2.5-pro")
+    prompt = f"{PROMPT_TRANSFORM_INSTRUCTIONS}\n\nInput: \"{user_query}\"\nOutput:"
+    resp = model.generate_content(prompt)
+    text = (resp.text or "").strip() if hasattr(resp, "text") else ""
+    # Ensure short output
+    if len(text.split()) > 8:
+        text = " ".join(text.split()[:8])
+    return text
 
 def main():
     st.title("🎯 AI Lead Generation Agent")
@@ -151,12 +200,25 @@ def main():
 
     with st.sidebar:
         st.header("API Keys")
-        firecrawl_api_key = st.text_input("Firecrawl API Key", type="password")
+        # Prefer Streamlit secrets; fallback to environment variables; allow UI override
+        def _get_secret(name: str) -> str:
+            try:
+                if name in st.secrets:
+                    return str(st.secrets[name])
+            except Exception:
+                pass
+            return os.environ.get(name, "")
+
+        firecrawl_api_key_default = _get_secret("FIRECRAWL_API_KEY")
+    composio_api_key_default = _get_secret("COMPOSIO_API_KEY")
+        gemini_keys_raw_default = _get_secret("GEMINI_API_KEYS")
+
+        firecrawl_api_key = st.text_input("Firecrawl API Key", value=firecrawl_api_key_default, type="password")
         st.caption(" Get your Firecrawl API key from [Firecrawl's website](https://www.firecrawl.dev/app/api-keys)")
-        openai_api_key = st.text_input("OpenAI API Key", type="password")
-        st.caption(" Get your OpenAI API key from [OpenAI's website](https://platform.openai.com/api-keys)")
-        composio_api_key = st.text_input("Composio API Key", type="password")
-        st.caption(" Get your Composio API key from [Composio's website](https://composio.ai)")
+    gemini_keys_raw = st.text_input("Gemini API Keys (comma-separated)", value=gemini_keys_raw_default, type="password")
+    st.caption(" Provide 1–3 Gemini API keys; they will be rotated per request. Get keys from Google AI Studio.")
+    composio_api_key = st.text_input("Composio API Key", value=composio_api_key_default, type="password")
+    st.caption(" Provide your Composio API key with Google Sheets integration enabled.")
         
         num_links = st.number_input("Number of links to search", min_value=1, max_value=10, value=3)
         
@@ -171,16 +233,31 @@ def main():
     )
 
     if st.button("Generate Leads"):
-        if not all([firecrawl_api_key, openai_api_key, composio_api_key, user_query]):
-            st.error("Please fill in all the API keys and describe what leads you're looking for.")
+        gemini_keys = _parse_gemini_keys(gemini_keys_raw)
+
+        if not firecrawl_api_key:
+            st.error("Firecrawl API key is required.")
+            return
+        if not gemini_keys:
+            st.error("At least one Gemini API key is required.")
+            return
+        if not composio_api_key:
+            st.error("Composio API key is required.")
+            return
+        if not user_query:
+            st.error("Describe what kind of leads you're looking for.")
+            return
         else:
             with st.spinner("Processing your query..."):
-                transform_agent = create_prompt_transformation_agent(openai_api_key)
-                company_description = transform_agent.run(f"Transform this query into a concise 3-4 word company description: {user_query}")
-                st.write("🎯 Searching for:", company_description.content)
+                try:
+                    concise = transform_with_gemini(gemini_keys, user_query)
+                except Exception as e:
+                    st.error(f"Gemini transform failed: {e}")
+                    return
+                st.write("🎯 Searching for:", concise)
             
             with st.spinner("Searching for relevant URLs..."):
-                urls = search_for_urls(company_description.content, firecrawl_api_key, num_links)
+                urls = search_for_urls(concise, firecrawl_api_key, num_links)
             
             if urls:
                 st.subheader("Quora Links Used:")
@@ -193,8 +270,8 @@ def main():
                 with st.spinner("Formatting user info..."):
                     flattened_data = format_user_info_to_flattened_json(user_info_list)
                 
-                with st.spinner("Writing to Google Sheets..."):
-                    google_sheets_link = write_to_google_sheets(flattened_data, composio_api_key, openai_api_key)
+                with st.spinner("Writing to Google Sheets via Composio..."):
+                    google_sheets_link = write_to_google_sheets_via_composio(flattened_data, composio_api_key)
                 
                 if google_sheets_link:
                     st.success("Lead generation and data writing to Google Sheets completed successfully!")
